@@ -130,7 +130,7 @@ const optimizePNG =
     }
 
     return sharp(buffer)
-      .png({ quality: quality * 100 })
+      .png({ quality: quality * 100, palette: true, compressionLevel: 9 })
       .toBuffer()
   }
 
