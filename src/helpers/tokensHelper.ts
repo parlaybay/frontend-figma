@@ -1,5 +1,5 @@
 import camelcase from 'camelcase'
-import { Effect, EffectType, FRAME, Node, StyleType, TEXT } from 'figma-api'
+import { Effect, EffectType, FRAME, Node, PaintType, StyleType, TEXT } from 'figma-api'
 import path from 'path'
 import { promises as fsAsync } from 'fs'
 import chalk from 'chalk'
@@ -73,9 +73,12 @@ const parseShadowTokens: CurriedTokenParser = (keyParser, noPrefix) => (child, n
   if (!styleNode || !effect) return
 
   const key = keyParser(styleNode.name, noPrefix)
-  const { offset, radius } = effect as Required<Effect>
+  const { offset, radius, color } = effect as Required<Effect>
 
-  return [key, `${offset.x.toFixed()}px ${offset.y.toFixed()}px ${radius.toFixed()}px ${createSolidColorString(child.fills[0])}`]
+  return [
+    key,
+    `${offset.x.toFixed()}px ${offset.y.toFixed()}px ${radius.toFixed()}px ${createSolidColorString({ type: PaintType.SOLID, color })}`,
+  ]
 }
 
 const parseStyleTokens: CurriedTokenParser = keyParser => child => {
