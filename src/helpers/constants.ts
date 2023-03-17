@@ -43,7 +43,7 @@ export type ImageVariant = {
 export type ImageKey = {
   name: string
   id: string
-  format: string
+  format: 'jpg' | 'png' | 'svg' | 'pdf'
   scale: number
   url: string
   variants?: Record<string, ImageVariant>
@@ -66,7 +66,7 @@ export type TextKey = {
   variants: Record<string, TextVariant>
 }
 
-export type Warning = { key: string; urls: { link: string; page: string }[]; page?: string; description?: string }
+export type Warning = { key?: string; urls?: { link: string; page: string }[]; page?: string; description?: string }
 
 export const CACHE_DIR_NAME = 'emu'
 export const CACHE_MAP_NAME = 'emu-cache-map.json'

@@ -1,3 +1,5 @@
+/* eslint-disable no-return-await */
+
 import path from 'path'
 import { promises as fsAsync } from 'fs'
 import { Node, TypeStyle } from 'figma-api'
@@ -262,20 +264,20 @@ export const findDuplicateWarnings = <NodeType extends Record<string, any>>({
   }, [])
 }
 
-export const writeWarningsLog = async (warnings: Warning[], logName = '') => {
-  const name = logName.length ? `${logName}.` : logName
+export const writeWarningLog = async ({ key, urls = [], description = '' }: Warning, logName = '') => {
+  const name = logName ? `${logName}.` : ''
 
   const logPath = path.join(process.cwd(), name + WARNING_LOG_NAME)
 
-  const log = warnings.reduce(
-    (text, { key, urls, description = '' }) =>
-      `${text}Key: ${key}\n${description}\n${urls.map(({ link, page }) => `${link} (${page})`).join('\n')}\n\n`,
-    '',
-  )
+  const log = `Key: ${key || 'N/A'}\n${description}\n${urls.map(({ link, page }) => `${link} (${page})`).join('\n')}\n\n`
 
-  await fsAsync.writeFile(logPath, log, 'utf-8')
-
-  return { logPath }
+  try {
+    await fsAsync.writeFile(logPath, log, 'utf-8')
+    return logPath
+  } catch (error) {
+    console.error(`Error writing warnings log to '${logPath}': ${error}`)
+    throw error
+  }
 }
 
 /**
@@ -297,17 +299,38 @@ export const mergeTextkeys = async (filepath: string, textkeys: Record<string, T
 
 type PrintWarningsOptions = { log?: boolean; project: string }
 
-export const printWarnings = async (warnings: Warning[], { log, project }: PrintWarningsOptions) => {
-  if (isVerboseEnv()) warnings.forEach(warning => console.log(chalk.yellow(`Found duplicate textkey '${warning.key}'`)))
-  if (warnings.length > 0) console.log(chalk.yellow(`Found a total of ${warnings.length} warnings`))
+export const printWarnings = async (warnings: Warning[], options: PrintWarningsOptions): Promise<void> => {
+  const { log, project } = options
+  const hasWarnings = warnings.length > 0
+
+  if (isVerboseEnv()) {
+    warnings.forEach(warning => console.log(chalk.yellow(`Found duplicate textkey '${warning.key}'`)))
+  }
+
+  if (hasWarnings) {
+    console.log(chalk.yellow(`Found a total of ${warnings.length} warnings`))
+  }
 
   if (!log) return
 
-  if (warnings.length <= 0) return console.log(chalk.yellow('Attempted to write a log file, but there are no warnings'))
+  if (!hasWarnings) {
+    console.log(chalk.yellow('Attempted to write a log file, but there are no warnings'))
+    return
+  }
 
-  const { logPath } = await writeWarningsLog(warnings, project)
+  try {
+    const logPaths = await Promise.allSettled(warnings.map(async warning => await writeWarningLog(warning, project)))
 
-  ora(chalk.yellow(`Written warnings log to '${logPath}'`)).succeed()
+    logPaths.forEach(result => {
+      if (result.status === 'fulfilled') {
+        ora(chalk.yellow(`Written warnings log to '${result.value}'`)).succeed()
+      } else {
+        console.error(result.reason)
+      }
+    })
+  } catch (error) {
+    console.error(error)
+  }
 }
 
 export const stringArrayToRegexArray = (strings: string[]) => strings.map(string => new RegExp(string))

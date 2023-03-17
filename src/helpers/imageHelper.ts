@@ -1,3 +1,6 @@
+/* eslint-disable no-return-await */
+/* eslint-disable no-restricted-syntax */
+
 import camelcase from 'camelcase'
 import path from 'path'
 import https from 'https'
@@ -8,7 +11,7 @@ import chalk from 'chalk'
 import { GetImageResult } from 'figma-api/lib/api-types.js'
 import sharp from 'sharp'
 import * as prompts from './prompts'
-import { createWarning, mergeTextkeys, stripDebugInfoFromTextKeys, writeWarningsLog } from './textHelper'
+import { createWarning, mergeTextkeys, stripDebugInfoFromTextKeys, writeWarningLog } from './textHelper'
 import { getAllProjectFiles, NodeParserContext } from './generics'
 import { ConfigFile, FigmaFile, ImageKey, IMAGEKEY_FILE_NAME, ImageVariant, IMAGE_DIR_NAME, Warning } from './constants'
 import { Figma } from '../abtractions/figma'
@@ -214,16 +217,37 @@ const handleImageDownload = async (image: ImageKey, url: string, options: Downlo
   return download(url, image.url)
 }
 
-export const downloadImagesWithProgress = (
+interface DownloadResult {
+  downloadPromises: Promise<unknown>[]
+  progress: Record<string, boolean>
+}
+
+export async function downloadImagesWithProgress(
   images: Record<string, ImageKey>,
   imageURLs: Record<string, string>,
+  currentImagesDirPath: string,
   options: DownloadOptions,
-) => {
+): Promise<DownloadResult> {
   const downloadProgress: Record<string, boolean> = {}
   const imageArray = Object.values(images)
 
+  let currentImagesObject: Record<string, ImageKey> | null = null
+
+  try {
+    const currentImagesFile = await fsAsync.readFile(path.join(currentImagesDirPath, '..', IMAGEKEY_FILE_NAME), { encoding: 'utf-8' })
+    currentImagesObject = JSON.parse(currentImagesFile)
+  } catch (error) {
+    console.warn('No previous images found, downloading all images')
+  }
+
   const downloadPromises = Object.entries(imageURLs).map(([id, url]) => {
-    if (url === null) return Promise.resolve()
+    if (currentImagesObject?.[path.basename(url!).split('.')[0]]) {
+      return Promise.resolve()
+    }
+
+    if (!url) {
+      return Promise.resolve()
+    }
 
     const image = imageArray.find(image => image.id === id)
 
@@ -233,7 +257,7 @@ export const downloadImagesWithProgress = (
 
     downloadProgress[id] = false
 
-    const imageDownload = handleImageDownload(image, url as string, options)
+    const imageDownload = handleImageDownload(image, url, options)
 
     imageDownload.then(() => {
       downloadProgress[id] = true
@@ -245,23 +269,20 @@ export const downloadImagesWithProgress = (
   return { downloadPromises, progress: downloadProgress }
 }
 
-type HandleProgressProps = {
-  promise: Promise<any>[]
+type HandleProgressProps<T> = {
+  promise: Promise<T>[]
   progress: Record<string, boolean>
 }
 
-export const handleProgress = async (
-  { promise, progress }: HandleProgressProps,
+export const handleProgress = <T>(
+  { promise, progress }: HandleProgressProps<T>,
   onUpdate?: (value: number, total: number, spinner: Ora) => void,
-) => {
+): Promise<T[]> => {
   const spinner = ora('').start()
-  let total = 0
-  let value = 0
+  const total = Object.keys(progress).length
+  const value = Object.values(progress).filter(v => v).length
 
   const updateSpinner = () => {
-    total = Object.values(progress).length
-    value = Object.values(progress).filter(v => !!v).length
-
     onUpdate?.(value, total, spinner)
   }
 
@@ -269,58 +290,65 @@ export const handleProgress = async (
 
   const all = Promise.all(promise)
 
-  all.then(() => {
-    updateSpinner()
-
-    spinner.succeed()
-    clearInterval(interval)
-  })
-
-  updateSpinner()
+  all
+    .then(() => {
+      spinner.succeed()
+      clearInterval(interval)
+    })
+    .finally(() => {
+      updateSpinner()
+    })
 
   return all
 }
 
+interface ImageMap {
+  [id: string]: string
+}
+
 const mapImageURL = (images: GetImageResult[]) => images.reduce((prev, result) => ({ ...prev, ...result.images }), {})
 
-export const getUrlsForImages = async (figma: Figma, figmaFile: FigmaFile, images: any[][]) => {
+export const getUrlsForImages = async (figma: Figma, figmaFile: FigmaFile, images: ImageKey[][]): Promise<ImageMap> => {
   const imageRequests = images
     .filter(imageSet => imageSet.length > 0)
     .map(imageSet => {
       const [firstImage] = imageSet
-      const { format } = firstImage
-      const scale = firstImage.scale > 4 ? 1 : firstImage.scale
+      const { format, scale } = firstImage
 
       const ids = imageSet.map(({ id }) => id).join(',')
 
-      return figma.image(figmaFile.url, { ids, scale, format })
+      return figma.image(figmaFile.url, { ids, scale: scale > 4 ? 1 : scale, format })
     })
 
-  return mapImageURL(await Promise.all(imageRequests))
+  const results = await Promise.all(imageRequests)
+
+  return mapImageURL(results)
 }
 
-// This method maps the images into a format that is required by the figma api
-export const groupImagesByTypeAndScale = (images: Record<string, ImageKey>) =>
-  Object.entries(images).reduce<Record<string, ImageKey[]>>((prev, [, value]) => {
-    const { scale, format } = value
+type GroupedImages = Record<string, ImageKey[]>
 
-    const key: string = `${format}_${scale}`
+export const groupImagesByTypeAndScale = (images: Record<string, ImageKey>): GroupedImages => {
+  const groupedImages: GroupedImages = {}
 
-    const prevImages: ImageKey[] = prev[key] ?? []
+  for (const [, imageKey] of Object.entries(images)) {
+    const { scale, format } = imageKey
 
-    return {
-      ...prev,
-      [key]: [...prevImages, value],
-    }
-  }, {})
+    const key = `${format}_${scale}`
+    const prevImages: ImageKey[] = groupedImages[key] || []
+
+    groupedImages[key] = [...prevImages, imageKey]
+  }
+
+  return groupedImages
+}
 
 export const handleMissingProject = async <T extends Record<string, any>>(
   figma: Figma,
   config: ConfigFile,
-  imageActionFunction: any,
+  imageActionFunction: (file: string, flags?: T & ProgramFlags) => Promise<void>,
   flags?: T & ProgramFlags,
-) => {
-  const spinner = ora('Fetching project files ...').start()
+): Promise<void> => {
+  const spinner = ora('Fetching project files...').start()
   const { files } = await getAllProjectFiles(figma, config.PROJECT_ID)
 
   spinner.succeed()
@@ -330,12 +358,17 @@ export const handleMissingProject = async <T extends Record<string, any>>(
 
   const { file } = await prompts.projectSelect(choices)
 
+  if (!file) {
+    throw new Error('No project file selected')
+  }
+
   return imageActionFunction(file, flags)
 }
 
-export const writeImageKeys = async (imageOutPath: string, keys: Record<string, any>, merge?: boolean) => {
-  const filepath = path.join(imageOutPath, '../', IMAGEKEY_FILE_NAME)
+export const writeImageKeys = async (imageOutPath: string, keys: Record<string, any>, merge = false): Promise<string> => {
+  const filepath = path.join(imageOutPath, '..', IMAGEKEY_FILE_NAME)
   const finalJSON = stripDebugInfoFromTextKeys(keys)
+
   const merged = merge ? await mergeTextkeys(filepath, finalJSON) : finalJSON
 
   await fsAsync.writeFile(filepath, JSON.stringify(merged, null, 2), 'utf-8')
@@ -343,19 +376,24 @@ export const writeImageKeys = async (imageOutPath: string, keys: Record<string, 
   return filepath
 }
 
-const sortImagesBySize = (images: ImageVariant[]) =>
-  images.sort((a, b) => {
-    const widthA: number = a?.width ?? 1
-    const heightA: number = a?.width ?? 1
+function sortImagesBySize(images: ImageVariant[]): ImageVariant[] {
+  if (!images.length) {
+    return []
+  }
 
-    const widthB: number = b?.width ?? 1
-    const heightB: number = b?.width ?? 1
+  return images.sort((a, b) => {
+    const widthA = a?.width || 1
+    const heightA = a?.height || 1
+
+    const widthB = b?.width || 1
+    const heightB = b?.height || 1
 
     const valueA = widthA * heightA
     const valueB = widthB * heightB
 
     return valueB - valueA
   })
+}
 
 type ImageLoggingOptions = {
   log?: boolean
@@ -365,59 +403,98 @@ type ImageLoggingOptions = {
   figmaFile: FigmaFile
 }
 
-export const handleImagesLogging = async ({ log, warnings, variantWarnings, project, figmaFile }: ImageLoggingOptions) => {
-  if (variantWarnings.length > 0) console.log(chalk.yellow(`${variantWarnings.length} images are missing a variant`))
-
-  if (warnings.length > 0) {
-    let message = `${warnings.length} images are missing exports or have been overwritten`
-
-    if (!log) message += ', pass the --log flag for more info'
-
-    console.log(chalk.yellow(message))
+export const handleImagesLogging = async ({
+  log,
+  warnings = [],
+  variantWarnings = [],
+  project,
+  figmaFile,
+}: ImageLoggingOptions): Promise<void> => {
+  if (variantWarnings?.length) {
+    console.log(chalk.yellow(`${variantWarnings.length} images are missing a variant`))
   }
 
-  if (log) {
-    const variantWarningsFormatted = variantWarnings.map(([image, missingVariants]) =>
-      createWarning({
-        node: { id: image.id, name: image.name } as any,
-        figmaFile,
-        description: `${image.name} is missing the following variants: ${missingVariants.join(', ')}`,
-      }),
-    )
+  if (!warnings?.length) return
 
-    const allWarnings = [...warnings, ...variantWarningsFormatted]
+  const message = `${warnings.length} images are missing exports or have been overwritten${
+    log ? ', pass the --log flag for more info' : ''
+  }`
 
-    if (allWarnings.length <= 0) return console.log(chalk.yellow('Attempted to write a log file, but there are no warnings'))
+  console.log(chalk.yellow(message))
 
-    const { logPath } = await writeWarningsLog(allWarnings, project)
+  if (!log) return
 
-    ora(chalk.yellow(`Written warnings log to '${logPath}'`)).succeed()
+  const variantWarningsFormatted = variantWarnings.map(([image, missingVariants]) => ({
+    node: { id: image.id, name: image.name },
+    figmaFile,
+    description: `${image.name} is missing the following variants: ${missingVariants.join(', ')}`,
+  }))
+
+  const allWarnings = [...warnings, ...variantWarningsFormatted].flat()
+
+  if (!allWarnings.length) {
+    console.log(chalk.yellow('Attempted to write a log file, but there are no warnings'))
+    return
+  }
+
+  try {
+    const logPaths = await Promise.allSettled(allWarnings.map(async warning => await writeWarningLog(warning, project)))
+
+    logPaths.forEach(result => {
+      if (result.status === 'fulfilled') {
+        ora(chalk.yellow(`Written warnings log to '${result.value}'`)).succeed()
+      } else {
+        console.error(result.reason)
+      }
+    })
+  } catch (error) {
+    console.error(error)
   }
 }
 
-const findMissingVariants = (image: ImageKey, variants: string[]) => variants.filter(variant => !image?.variants?.[variant])
+function findMissingVariants(image: ImageKey, variants: string[]): string[] {
+  const missingVariants: string[] = []
 
-export const reduceDesktopVariants = (images: Record<string, ImageKey>, variants: string[]) => {
+  for (const variant of variants) {
+    if (!image.variants?.[variant]) {
+      missingVariants.push(variant)
+    }
+  }
+
+  return missingVariants
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined
+}
+
+export function reduceDesktopVariants(
+  images: Record<string, ImageKey>,
+  variants: string[],
+): [Record<string, ImageKey>, [ImageKey, string[]][]] {
   const warnings: [ImageKey, string[]][] = []
 
-  if (!variants.length) return [images, [] as [ImageKey, string[]][]] as const
+  if (variants.length === 0) {
+    return [images, warnings]
+  }
 
-  const desktopVariants = Object.entries(images).reduce<Record<string, ImageKey>>((prev, [key, value]) => {
+  const desktopVariants: Record<string, ImageKey> = {}
+
+  for (const [key, value] of Object.entries(images)) {
     const missingVariants = findMissingVariants(value, variants)
 
-    if (missingVariants.length) {
+    if (missingVariants.length > 0) {
       warnings.push([value, missingVariants])
     }
 
-    const ImageVariants = variants
-      .map(variant => value?.variants?.[variant])
-      .filter(image => typeof image !== 'undefined') as ImageVariant[]
+    const imageVariants = variants.map(variant => value?.variants?.[variant]).filter(isDefined) as ImageVariant[]
+    const largestImage = sortImagesBySize(imageVariants)[0]
 
-    // Sort the images size and grab the largest image id
-    const [{ id }] = sortImagesBySize(ImageVariants)
+    desktopVariants[key] = {
+      ...value,
+      id: largestImage?.id ?? value.id,
+    }
+  }
 
-    return { ...prev, [key]: { ...value, id: id ?? value.id } }
-  }, {})
-
-  return [desktopVariants, warnings] as const
+  return [desktopVariants, warnings]
 }
