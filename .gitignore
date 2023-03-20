@@ -7,3 +7,4 @@ lib
 bin
 .npmrc
 .tgz
+.DS_STORE

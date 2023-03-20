@@ -1,12 +1,13 @@
 import camelcase from 'camelcase'
-import { Effect, EffectType, FRAME, Node, StyleType, TEXT } from 'figma-api'
+import { Effect, EffectType, FRAME, Node, PaintType, StyleType, TEXT } from 'figma-api'
 import path from 'path'
 import { promises as fsAsync } from 'fs'
 import chalk from 'chalk'
 import { GetFileResult } from 'figma-api/lib/api-types.js'
-import { getRGBStringAlphaMerged, parseStyle, roundDecimals } from './textHelper'
+import { parseStyle, roundDecimals } from './textHelper'
 import { EMU_TOKEN_TYPE_LAYER_NAME, TOKENS_DIR_NAME } from './constants'
 import { recursiveReduceChildren } from './generics'
+import { createSolidColorString, createLinearGradientString, createRadialGradientString } from './colorHelper'
 
 type NodeStyle = {
   key: string
@@ -47,18 +48,20 @@ const parseColorTokens: CurriedTokenParser = (keyParser, noPrefix) => (child, no
 
   if (!styleNode) return
 
-  // child.background is deprecated, its now stored in child.fills
-  const [{ color, opacity, gradientStops }] = [...child.fills, ...child.strokes]
   const key = keyParser(styleNode.name, noPrefix)
 
-  if (gradientStops) {
-    const [{ color: startColor }, { color: endColor }] = gradientStops
+  const fills = child.fills?.[0]
 
-    return [key, `linear-gradient(135deg, ${getRGBStringAlphaMerged(startColor)} 0%, ${getRGBStringAlphaMerged(endColor)} 100%)`]
+  if (fills?.type === 'SOLID') {
+    return [key, createSolidColorString(fills)]
   }
 
-  if (color) {
-    return [key, getRGBStringAlphaMerged({ ...color, a: opacity ?? color?.a })]
+  if (fills?.type === 'GRADIENT_LINEAR') {
+    return [key, createLinearGradientString(fills)]
+  }
+
+  if (fills?.type === 'GRADIENT_RADIAL') {
+    return [key, createRadialGradientString(fills)]
   }
 }
 
@@ -72,7 +75,10 @@ const parseShadowTokens: CurriedTokenParser = (keyParser, noPrefix) => (child, n
   const key = keyParser(styleNode.name, noPrefix)
   const { offset, radius, color } = effect as Required<Effect>
 
-  return [key, `${offset.x.toFixed()}px ${offset.y.toFixed()}px ${radius.toFixed()}px ${getRGBStringAlphaMerged(color)}`]
+  return [
+    key,
+    `${offset.x.toFixed()}px ${offset.y.toFixed()}px ${radius.toFixed()}px ${createSolidColorString({ type: PaintType.SOLID, color })}`,
+  ]
 }
 
 const parseStyleTokens: CurriedTokenParser = keyParser => child => {
@@ -168,22 +174,22 @@ type ParseTokensOptions = {
 export const parseTokens = (file: GetFileResult, options?: ParseTokensOptions) => {
   const nodeStyles = parseStyleNodes(file)
   const tokens = file.document.children.map(child => child.name)
+  const allTokens: Record<string, any> = {}
 
-  return tokens.reduce<Record<string, Record<string, string>>>((allTokens, token) => {
+  for (const token of tokens) {
     const rootPage = file.document.children.find(node => node.name === token) as any
     const rootFrame = findTokensRoot(file, token)
-
     const tokensType = getTokenType(rootPage)
 
     if (typeof rootFrame === 'undefined') {
       const pages = file.document.children.map(child => child.name)
       const rootLayers = rootPage?.children?.map((child: Node) => child.name)
 
-      console.error(chalk.red(`Unable to find frame '${token}' in page '${token}'. Could it the wrong file?`))
-      console.error(chalk.red(`Found these pages at the top: ${pages.join(', ')}`))
-      console.error(chalk.red(`Found these layers at the top (a frame named '${token}' should be here): ${rootLayers.join(', ')}`))
+      console.warn(chalk.yellow(`Unable to find frame '${token}' in page '${token}'. Could it the wrong file?`))
+      console.warn(chalk.yellow(`Found these pages at the top: ${pages.join(', ')}`))
+      console.warn(chalk.yellow(`Found these layers at the top (a frame named '${token}' should be here): ${rootLayers.join(', ')}`))
 
-      return allTokens
+      continue
     }
 
     const reducer = (prev: any, node: any) => {
@@ -199,6 +205,8 @@ export const parseTokens = (file: GetFileResult, options?: ParseTokensOptions) =
       initial: {},
     })
 
-    return { ...allTokens, [token]: parsedTokens }
-  }, {})
+    allTokens[token] = parsedTokens
+  }
+
+  return allTokens
 }

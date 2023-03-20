@@ -134,7 +134,7 @@ const image = async (incomingProject?: string, rawFlags?: Flags): Promise<void> 
   await recursiveMkdir(parsedOutputDir)
 
   const options = { quality: flags.quality, optimize: flags.optimize, tsx: flags.tsx, native: flags.native } as DownloadOptions
-  const { progress, downloadPromises } = downloadImagesWithProgress(largestVariants, imageURLs, options)
+  const { progress, downloadPromises } = await downloadImagesWithProgress(largestVariants, imageURLs, parsedOutputDir, options)
 
   await handleProgress({ promise: downloadPromises, progress }, (value, total, spinner) => {
     // eslint-disable-next-line no-param-reassign
