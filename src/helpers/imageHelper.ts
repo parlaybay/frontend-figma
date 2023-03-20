@@ -1,6 +1,3 @@
-/* eslint-disable no-return-await */
-/* eslint-disable no-restricted-syntax */
-
 import camelcase from 'camelcase'
 import path from 'path'
 import https from 'https'
@@ -11,47 +8,44 @@ import chalk from 'chalk'
 import { GetImageResult } from 'figma-api/lib/api-types.js'
 import sharp from 'sharp'
 import * as prompts from './prompts'
-import { createWarning, mergeTextkeys, stripDebugInfoFromTextKeys, writeWarningLog } from './textHelper'
+import { createWarning, mergeTextkeys, stripDebugInfoFromTextKeys, writeWarningsLog } from './textHelper'
 import { getAllProjectFiles, NodeParserContext } from './generics'
 import { ConfigFile, FigmaFile, ImageKey, IMAGEKEY_FILE_NAME, ImageVariant, IMAGE_DIR_NAME, Warning } from './constants'
 import { Figma } from '../abtractions/figma'
 import { ProgramFlags } from '../cli'
 
 export const getImageOutputDir = (outDir?: string): string => {
-  const endsWithFilename = outDir && path.extname(outDir).includes('.')
-  const outDirName = endsWithFilename ? path.dirname(outDir) : outDir
-
-  const outPath = path.join(process.cwd(), IMAGE_DIR_NAME)
-
-  if (outDirName) {
-    if (path.isAbsolute(outDirName)) {
-      return path.join(outDirName)
-    }
-
-    return path.join(process.cwd(), outDirName)
+  if (!outDir) {
+    return path.join(process.cwd(), IMAGE_DIR_NAME)
   }
 
-  return outPath
+  const endsWithFilename = path.extname(outDir).includes('.')
+  const outDirName = endsWithFilename ? path.dirname(outDir) : outDir
+
+  if (path.isAbsolute(outDirName)) {
+    return outDirName
+  }
+
+  return path.join(process.cwd(), outDirName)
 }
 
 const parseImageName = (name: string) => camelcase(name.replaceAll('/', '-'))
 
 export const parseImageNode = (node: any, prev: any, { variant, outDir, page, figmaFile, mergeWarnings }: NodeParserContext) => {
-  const [exportSettings] = node?.exportSettings ?? []
+  const exportSettings = node?.exportSettings?.[0]
 
-  if (!exportSettings) return prev
+  if (!exportSettings) {
+    return prev
+  }
 
   const name = parseImageName(path.basename(node.name))
-
-  const format = exportSettings ? exportSettings.format.toString().toLowerCase() : 'png'
-  const scale = exportSettings ? exportSettings.constraint.value : 1
+  const format = exportSettings.format.toString().toLowerCase()
+  const scale = exportSettings.constraint.value
   const filename = `${name}.${format}`
   const { width, height } = node.absoluteBoundingBox
-
   const absoluteFilePath = path.join(getImageOutputDir(outDir), filename)
   const relativeFilePath = path.relative(process.cwd(), absoluteFilePath)
-
-  const prevVariants: Record<string, any> = prev[name]?.variants ?? {}
+  const prevVariants = prev[name]?.variants ?? {}
 
   const newNode = {
     debug: {
@@ -66,7 +60,7 @@ export const parseImageNode = (node: any, prev: any, { variant, outDir, page, fi
   }
 
   if (variant) {
-    if (Object.keys(prevVariants).includes(variant)) {
+    if (variant in prevVariants) {
       mergeWarnings?.([
         createWarning({
           node,
@@ -101,43 +95,52 @@ export const parseImageNode = (node: any, prev: any, { variant, outDir, page, fi
 
 const svgr =
   (outputPath: string, native = false) =>
-  (chunks: Buffer[]) => {
-    const [filename] = path.basename(outputPath).split('.')
-    const svg = Buffer.concat(chunks).toString()
+  async (chunks: Buffer[]) => {
+    try {
+      const [filename] = path.basename(outputPath).split('.')
+      const svg = Buffer.concat(chunks).toString()
 
-    return transform(
-      svg,
-      {
+      const options = {
         plugins: ['@svgr/plugin-jsx'],
         typescript: true,
         prettier: true,
         svgo: false,
         native,
-      },
-      {
-        componentName: filename,
-      },
-    ).catch(error => {
+      }
+
+      const result = await transform(svg, options, { componentName: filename })
+
+      return result
+    } catch (error) {
       console.error(chalk.red('\nUnable to parse SVG'))
       console.error(error)
-    })
+
+      throw error
+    }
   }
 
 const optimizePNG =
   ({ quality, optimize }: { quality: number; optimize: boolean }) =>
   async (chunks: Buffer[]) => {
-    const buffer = Buffer.concat(chunks)
-
-    if (optimize === false) {
-      return buffer
+    if (!optimize) {
+      return Buffer.concat(chunks)
     }
 
-    return sharp(buffer)
+    const buffer = Buffer.concat(chunks)
+
+    const result = await sharp(buffer)
       .png({ quality: quality * 100 })
       .toBuffer()
+
+    return result
   }
 
-const download = (url: string, outputPath: string, parser?: (data: Buffer[]) => Promise<string | Buffer | void>, storeSource?: string) =>
+const download = (
+  url: string,
+  outputPath: string,
+  parser?: (data: Buffer[]) => Promise<string | Buffer | void>,
+  storeSource?: string,
+): Promise<void> =>
   new Promise((resolve, reject) => {
     const stream = fs.createWriteStream(outputPath, { flags: 'w' })
     const source = storeSource ? fs.createWriteStream(storeSource, { flags: 'w' }) : undefined
@@ -146,11 +149,14 @@ const download = (url: string, outputPath: string, parser?: (data: Buffer[]) => 
     stream.on('close', resolve).on('error', reject)
 
     https.get(url, res => {
-      if (!parser) return res.pipe(stream)
+      if (!parser) {
+        return res.pipe(stream)
+      }
 
       res.on('data', chunk => chunks.push(chunk))
+
       res.on('end', () => {
-        if (chunks.length === 0) {
+        if (!chunks.length) {
           console.warn(
             chalk.redBright(
               `\nDownloaded image with 0 chunks (${outputPath}), most likely an invalid or empty image/svg or its not exported in figma`,
@@ -158,11 +164,11 @@ const download = (url: string, outputPath: string, parser?: (data: Buffer[]) => 
           )
 
           stream.close()
-          fsAsync.unlink(outputPath)
+          fs.unlinkSync(outputPath)
 
           if (source && storeSource) {
             source.close()
-            fsAsync.unlink(storeSource)
+            fs.unlinkSync(storeSource)
           }
 
           return
@@ -176,7 +182,9 @@ const download = (url: string, outputPath: string, parser?: (data: Buffer[]) => 
         parser(chunks).then(data => {
           if (!data) {
             console.warn(chalk.redBright(`\nImage parser returned 0 chunks (${outputPath}), most likely an invalid or empty image/svg`))
-            return stream.close()
+            stream.close()
+
+            return
           }
 
           stream.write(data)
@@ -231,20 +239,16 @@ export async function downloadImagesWithProgress(
   const downloadProgress: Record<string, boolean> = {}
   const imageArray = Object.values(images)
 
-  let currentImagesObject: Record<string, ImageKey> | null = null
+  let currentImages: Record<string, ImageKey> | null = null
 
   try {
     const currentImagesFile = await fsAsync.readFile(path.join(currentImagesDirPath, '..', IMAGEKEY_FILE_NAME), { encoding: 'utf-8' })
-    currentImagesObject = JSON.parse(currentImagesFile)
+    currentImages = JSON.parse(currentImagesFile)
   } catch (error) {
     console.warn('No previous images found, downloading all images')
   }
 
   const downloadPromises = Object.entries(imageURLs).map(([id, url]) => {
-    if (currentImagesObject?.[path.basename(url!).split('.')[0]]) {
-      return Promise.resolve()
-    }
-
     if (!url) {
       return Promise.resolve()
     }
@@ -252,6 +256,10 @@ export async function downloadImagesWithProgress(
     const image = imageArray.find(image => image.id === id)
 
     if (!image) {
+      return Promise.resolve()
+    }
+
+    if (currentImages && image.name in currentImages) {
       return Promise.resolve()
     }
 
@@ -279,10 +287,14 @@ export const handleProgress = <T>(
   onUpdate?: (value: number, total: number, spinner: Ora) => void,
 ): Promise<T[]> => {
   const spinner = ora('').start()
-  const total = Object.keys(progress).length
-  const value = Object.values(progress).filter(v => v).length
+
+  let total = 0
+  let value = 0
 
   const updateSpinner = () => {
+    total = Object.values(progress).length
+    value = Object.values(progress).filter(v => !!v).length
+
     onUpdate?.(value, total, spinner)
   }
 
@@ -290,14 +302,14 @@ export const handleProgress = <T>(
 
   const all = Promise.all(promise)
 
-  all
-    .then(() => {
-      spinner.succeed()
-      clearInterval(interval)
-    })
-    .finally(() => {
-      updateSpinner()
-    })
+  all.then(() => {
+    updateSpinner()
+
+    spinner.succeed()
+    clearInterval(interval)
+  })
+
+  updateSpinner()
 
   return all
 }
@@ -430,7 +442,7 @@ export const handleImagesLogging = async ({
     description: `${image.name} is missing the following variants: ${missingVariants.join(', ')}`,
   }))
 
-  const allWarnings = [...warnings, ...variantWarningsFormatted].flat()
+  const allWarnings = [...warnings, ...variantWarningsFormatted].flat() as Warning[]
 
   if (!allWarnings.length) {
     console.log(chalk.yellow('Attempted to write a log file, but there are no warnings'))
@@ -438,15 +450,9 @@ export const handleImagesLogging = async ({
   }
 
   try {
-    const logPaths = await Promise.allSettled(allWarnings.map(async warning => await writeWarningLog(warning, project)))
+    const { logPath } = await writeWarningsLog(allWarnings, project)
 
-    logPaths.forEach(result => {
-      if (result.status === 'fulfilled') {
-        ora(chalk.yellow(`Written warnings log to '${result.value}'`)).succeed()
-      } else {
-        console.error(result.reason)
-      }
-    })
+    ora(chalk.yellow(`Written warnings log to '${logPath}'`)).succeed()
   } catch (error) {
     console.error(error)
   }
@@ -464,17 +470,13 @@ function findMissingVariants(image: ImageKey, variants: string[]): string[] {
   return missingVariants
 }
 
-function isDefined<T>(value: T | undefined): value is T {
-  return value !== undefined
-}
-
 export function reduceDesktopVariants(
   images: Record<string, ImageKey>,
   variants: string[],
 ): [Record<string, ImageKey>, [ImageKey, string[]][]] {
   const warnings: [ImageKey, string[]][] = []
 
-  if (variants.length === 0) {
+  if (!variants.length) {
     return [images, warnings]
   }
 
@@ -483,11 +485,13 @@ export function reduceDesktopVariants(
   for (const [key, value] of Object.entries(images)) {
     const missingVariants = findMissingVariants(value, variants)
 
-    if (missingVariants.length > 0) {
+    if (missingVariants.length) {
       warnings.push([value, missingVariants])
     }
 
-    const imageVariants = variants.map(variant => value?.variants?.[variant]).filter(isDefined) as ImageVariant[]
+    const imageVariants = variants
+      .map(variant => value?.variants?.[variant])
+      .filter(image => typeof image !== 'undefined') as ImageVariant[]
     const largestImage = sortImagesBySize(imageVariants)[0]
 
     desktopVariants[key] = {

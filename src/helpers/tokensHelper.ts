@@ -174,22 +174,22 @@ type ParseTokensOptions = {
 export const parseTokens = (file: GetFileResult, options?: ParseTokensOptions) => {
   const nodeStyles = parseStyleNodes(file)
   const tokens = file.document.children.map(child => child.name)
+  const allTokens: Record<string, any> = {}
 
-  return tokens.reduce<Record<string, Record<string, string>>>((allTokens, token) => {
+  for (const token of tokens) {
     const rootPage = file.document.children.find(node => node.name === token) as any
     const rootFrame = findTokensRoot(file, token)
-
     const tokensType = getTokenType(rootPage)
 
     if (typeof rootFrame === 'undefined') {
       const pages = file.document.children.map(child => child.name)
       const rootLayers = rootPage?.children?.map((child: Node) => child.name)
 
-      console.error(chalk.red(`Unable to find frame '${token}' in page '${token}'. Could it the wrong file?`))
-      console.error(chalk.red(`Found these pages at the top: ${pages.join(', ')}`))
-      console.error(chalk.red(`Found these layers at the top (a frame named '${token}' should be here): ${rootLayers.join(', ')}`))
+      console.warn(chalk.yellow(`Unable to find frame '${token}' in page '${token}'. Could it the wrong file?`))
+      console.warn(chalk.yellow(`Found these pages at the top: ${pages.join(', ')}`))
+      console.warn(chalk.yellow(`Found these layers at the top (a frame named '${token}' should be here): ${rootLayers.join(', ')}`))
 
-      return allTokens
+      continue
     }
 
     const reducer = (prev: any, node: any) => {
@@ -205,6 +205,8 @@ export const parseTokens = (file: GetFileResult, options?: ParseTokensOptions) =
       initial: {},
     })
 
-    return { ...allTokens, [token]: parsedTokens }
-  }, {})
+    allTokens[token] = parsedTokens
+  }
+
+  return allTokens
 }

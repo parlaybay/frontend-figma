@@ -1,5 +1,3 @@
-/* eslint-disable no-return-await */
-
 import path from 'path'
 import { promises as fsAsync } from 'fs'
 import { Node, TypeStyle } from 'figma-api'
@@ -264,20 +262,20 @@ export const findDuplicateWarnings = <NodeType extends Record<string, any>>({
   }, [])
 }
 
-export const writeWarningLog = async ({ key, urls = [], description = '' }: Warning, logName = '') => {
-  const name = logName ? `${logName}.` : ''
+export const writeWarningsLog = async (warnings: Warning[], logName = '') => {
+  const name = logName.length ? `${logName}.` : logName
 
   const logPath = path.join(process.cwd(), name + WARNING_LOG_NAME)
 
-  const log = `Key: ${key || 'N/A'}\n${description}\n${urls.map(({ link, page }) => `${link} (${page})`).join('\n')}\n\n`
+  const log = warnings.reduce(
+    (text, { key, urls, description = '' }) =>
+      `${text}Key: ${key}\n${description}\n${urls.map(({ link, page }) => `${link} (${page})`).join('\n')}\n\n`,
+    '',
+  )
 
-  try {
-    await fsAsync.writeFile(logPath, log, 'utf-8')
-    return logPath
-  } catch (error) {
-    console.error(`Error writing warnings log to '${logPath}': ${error}`)
-    throw error
-  }
+  await fsAsync.writeFile(logPath, log, 'utf-8')
+
+  return { logPath }
 }
 
 /**
@@ -319,15 +317,9 @@ export const printWarnings = async (warnings: Warning[], options: PrintWarningsO
   }
 
   try {
-    const logPaths = await Promise.allSettled(warnings.map(async warning => await writeWarningLog(warning, project)))
+    const { logPath } = await writeWarningsLog(warnings, project)
 
-    logPaths.forEach(result => {
-      if (result.status === 'fulfilled') {
-        ora(chalk.yellow(`Written warnings log to '${result.value}'`)).succeed()
-      } else {
-        console.error(result.reason)
-      }
-    })
+    ora(chalk.yellow(`Written warnings log to '${logPath}'`)).succeed()
   } catch (error) {
     console.error(error)
   }
